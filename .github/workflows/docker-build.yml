@@ -32,6 +32,6 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/fold_flow/foldflow_env:v3
+          tags: ghcr.io/rainyyyyyyy111/fold_flow/foldflow_env:v3
           cache-from: type=gha
           cache-to: type=gha,mode=max
