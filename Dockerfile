@@ -1,37 +1,55 @@
-# 使用 NVIDIA 官方提供的 PyTorch 基础镜像
-FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+# ==========================================
+# 阶段 1：编译环境 (Builder Stage) - 极度臃肿，但用完即丢
+# ==========================================
+FROM --platform=linux/amd64 nvidia/cuda:11.6.1-cudnn8-devel-ubuntu20.04 AS builder
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive \
+    MAMBA_ROOT_PREFIX=/opt/conda \
+    PATH=/opt/conda/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git wget curl vim htop && rm -rf /var/lib/apt/lists/*
+    wget bzip2 curl git build-essential cmake python3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir --upgrade pip
+RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba && \
+    mkdir -p /opt/conda && mv ./bin/micromamba /opt/conda/bin/
 
-# ==============================================================
-# 第一部分：深度学习与流形核心依赖
-# ==============================================================
-RUN pip install --no-cache-dir \
-    e3nn einops opt-einsum wandb pytorch-lightning torchmetrics \
-    torchsde torchdiffeq geoopt~=0.4.0 jax jaxlib dm-tree \
-    hydra-core==1.2.0 hydra-colorlog==1.2.0 hydra-optuna-sweeper==1.2.0 \
-    hydra-submitit-launcher omegaconf deepspeed ninja h5py tensorboard
+WORKDIR /app
+COPY . /app
 
-# 作者魔改版的 geomstats
-RUN pip install --no-cache-dir git+https://github.com/joeybose/geomstats.git@master
+# 1. 剔除 -e .，防止 Singularity 只读挂载报错
+# 2. 安装全部依赖，编译 C++ 包
+# 3. 静态安装项目，清理多余缓存
+RUN sed -i '/- -e ./d' environment.yaml && \
+    micromamba create -y -f environment.yaml && \
+    micromamba run -n foldflow-env pip install --no-cache-dir . && \
+    micromamba clean --all --yes
 
-# ==============================================================
-# 第二部分：生信分析、基础计算与 OpenFold 魔鬼依赖大全
-# ==============================================================
-# 注意：OpenMM 及其旧版 simtk 接口是这里的难点
-RUN pip install --no-cache-dir \
-    numpy scipy pandas matplotlib scikit-learn seaborn>=0.12.2 \
-    biopython fair-esm mdtraj pot scprep scanpy timm GPUtil \
-    lmdb plotly pydantic ml-collections \
-    absl-py git+https://github.com/NVIDIA/dllogger.git tmtools ipdb
+# 关键：删除预编译的 __pycache__ 和 pip 缓存，节省几百 MB
+RUN find /opt/conda/envs/foldflow-env -type d -name "__pycache__" -exec rm -rf {} +
 
-# 为了支持 simtk.openmm 的导入（AlphaFold/OpenFold 的残留），安装官方 openmm
-RUN conda install -y -c conda-forge openmm pdbfixer
+# ==========================================
+# 阶段 2：运行环境 (Runtime Stage) - 极限小巧，最终推送到 GitHub 的产物
+# ==========================================
+# 改用 runtime 镜像，没有巨无霸级的 nvcc 编译器，体积立减数 GB！
+FROM --platform=linux/amd64 nvidia/cuda:11.6.1-cudnn8-runtime-ubuntu20.04
 
-WORKDIR /workspace
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    MAMBA_ROOT_PREFIX=/opt/conda \
+    PATH=/opt/conda/envs/foldflow-env/bin:$PATH
+
+# 仅安装运行时必须的极少量系统库 (如 libgomp1 对于大矩阵运算必不可少)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 从 builder 阶段，直接把编译好的整个虚拟环境"端过来"
+COPY --from=builder /opt/conda/envs/foldflow-env /opt/conda/envs/foldflow-env
+# 拷入我们的项目代码
+COPY --from=builder /app /app
+
+WORKDIR /app
+
+# 设置默认启动命令
+CMD ["python", "runner/inference.py", "--help"]
