@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba && \
-    mkdir -p /opt/conda && mv ./bin/micromamba /opt/conda/bin/
+    mkdir -p /opt/conda/bin && mv ./bin/micromamba /opt/conda/bin/
 
 WORKDIR /app
 COPY . /app
